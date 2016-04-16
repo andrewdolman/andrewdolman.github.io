@@ -1,0 +1,647 @@
+---
+title: "What are boosted regression trees?"
+author: "Andrew M. Dolman"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  ioslides_presentation:
+    css: styles.css
+institute: Brandenburg University of Technology, Cottbus - Senftenberg
+---
+
+```{r knitr_opts, echo=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE, tidy=FALSE, echo = FALSE, cache=TRUE)
+```
+
+```{r packages}
+library(gbm)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(limnolrgy)
+library(gridExtra)
+library(tree)
+library(ggdendro)
+```
+
+```{r make_data}
+make_data <- function(n, Grp = "A", b0 = 5, b1 = -0.1){
+
+x = seq(0.01, 10, length.out = n)
+dat <- data.frame(x = x,
+                  Grp = Grp,
+                  True = sin(x) + b0 + b1 * x,
+                  y = sin(x) + rnorm(length(x), 0, 0.5) + b0 + b1 * x)
+
+
+# Define test and training sets
+
+dat$Set <- FALSE
+dat[sample(1:nrow(dat), nrow(dat) / 5, replace = FALSE), "Set"] <- "Test"
+dat$Set <- factor(ifelse(dat$Set == "Test", "Test", "Training"), ordered = TRUE,
+                  levels = c("Training", "Test"))  
+dat <- dat[(order(dat$Set)),]
+return(dat)
+}
+
+set.seed(1)
+dat <- make_data(n = 1000) %>% 
+  tbl_df()
+
+#dat$x2 <- factor("A")
+```
+
+
+```{r fit_gbms, results='hide', message = FALSE, warning=FALSE, echo = FALSE, error = FALSE}
+shrinks <- data.frame(shrinkage = c(1, 0.5, 0.1, 0.01))
+
+mods <- plyr::alply(shrinks, 1, function(s) gbm(y ~ x, shrinkage = s$shrinkage
+                                                   , n.trees = 5000
+                                                   , train.fraction = 4/5
+                                                   , n.minobsinnode = 5
+                                                   , data = dat, verbose = FALSE))
+
+par(mfrow = c(2,2))
+best_iter <- plyr::ldply(mods, gbm.perf, method = "test", plot.it = FALSE)
+par(mfrow = c(1, 1))
+```
+
+
+```{r newdata}
+newdat <- dat %>% 
+  arrange(x)
+
+preds <- plyr::ldply(mods, function(x) predict(x, newdata = newdat, n.trees = c(1:8, 16, 32, 64, 128, 1000, 5000)))
+
+newdat2 <- cbind(newdat, preds) %>% 
+  gather(ntrees, prediction, -x, -Grp, -y, -Set, -True, -shrinkage) %>%
+  mutate(resid = y - prediction,
+         tree_grp = "seq",
+         ntrees = as.integer(as.character(ntrees))) %>% 
+  tbl_df()
+
+
+best_preds <- plyr::ldply(mods, function(x)
+  data.frame(prediction = predict(x, newdata = newdat, n.trees = gbm.perf(x, method = "test", plot.it = FALSE)),
+             ntrees = (gbm.perf(x, method = "test", plot.it = FALSE)),
+             tree_grp = "best")) %>% 
+  cbind(newdat) %>% 
+  tbl_df()
+
+
+newdat3 <- bind_rows(newdat2, best_preds) %>% 
+  mutate(shrink_num = shrinkage, 
+         shrinkage = factor(shrinkage, ordered = T, levels = (unique(shrinkage))),
+         ntrees = factor(ntrees, ordered  = T)) 
+
+newdat_all_x <- newdat3 %>% 
+  filter(Set == "Training") %>% 
+  mutate(Set = "Test") %>% 
+  bind_rows(., filter(newdat3, Set == "Training")) %>% 
+  select(Set, x, y, True, prediction, shrinkage, shrink_num, ntrees)
+
+## Progressive fitting
+
+newdat4 <- newdat3 %>% 
+  filter(ntrees == 1) %>% 
+  mutate(ntrees = factor(0),
+         prediction = mean(y),
+         resid = y - prediction) %>% 
+  bind_rows(newdat3, .)
+
+newdat5 <- newdat4 %>%
+  filter(ntrees %in% 0:8) %>%
+  select(-resid) %>% 
+  spread(ntrees, prediction) %>% 
+  mutate(`0` = `1` - `0`,
+         `1` = `2` - `1`,
+         `2` = `3` - `2`,
+         `3` = `4` - `3`,
+         `4` = `5` - `4`,
+         `5` = `6` - `5`,
+         `6` = `7` - `6`,
+         `7` = `8` - `7`
+  ) %>% 
+  gather(ntrees, next_tree, -tree_grp, -shrinkage, -shrink_num, -Grp, -Set, -y, -True, -x)
+
+newdat6 <- newdat4 %>% 
+#select(x, resid, ntrees, shrinkage, Set) %>% 
+  left_join(., newdat5) %>% 
+  mutate(tree = as.numeric(ntrees) + 1)
+```
+
+# An example
+
+## Estimate unknown function
+
+Simulate some data
+
+```{r show_sim_data}
+newdat %>%
+  ggplot(aes(x = x, y = y)) %>% 
+  + geom_line(aes(y = True), colour = "Black", size = 1.5) %>% 
+  + geom_point(colour = "Black", alpha = 0.5) %>% 
+#  + facet_wrap(~ Set, labeller = label_both)%>% 
+  + theme_bw_2_asp1()
+```
+
+
+
+```{r basic_tree, include=FALSE}
+tr1 <- tree(y ~ x, data = newdat)
+
+# tr2 <- tr1
+# tr2$frame$splits[,1] <- ""
+plot(tr1, type = "uniform")
+text(tr1, label = "yval", digits = 2, all = T)
+#text(tr1, label = "dev", digits = 2, all = T)
+
+tree_data <- dendro_data(tr1, type = "proportional")
+tree_segs <- segment(tree_data)
+
+p_tree <- tree_segs %>%
+  ggplot() %>%
+  + geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) %>%
+#  + geom_text(data = label(tree_data), aes(x = x, y = y, label = label), vjust = -1) %>%
+  + geom_text(data = leaf_label(tree_data), aes(x = x, y = y, label = round(label, 1)), vjust = 1) %>%
+  + theme_dendro() %>%
+  + scale_x_continuous(limits = c(0, 10)) %>%
+  + theme(aspect.ratio = 0.75)
+```
+
+## 
+
+With one predictor a tree can be represented as a piecewise function
+
+```{r}
+newdat$y_hat_tr1 <- predict(tr1)
+
+p <- newdat %>%
+  ggplot(aes(x = x, y = y)) %>% 
+  + geom_point(colour = "Black", alpha = 0.25) %>% 
+  + geom_line(aes(y = True, colour = "True function"), size = 1.5) %>% 
+  + geom_line(aes(y = y_hat_tr1, colour = "Tree estimate"), size = 1.5) %>% 
+  + scale_colour_manual("", values = c("Red", "Black")) %>% 
+  + scale_x_continuous(limits = c(0, 10)) %>% 
+  + theme_bw_2_asp1() %>% 
+  + theme(legend.position = "top")
+#p
+
+p12 <- limnolrgy::gg_arrange(list(p_tree, p), grid.arrange_args = list(ncol = 2), align_horizontal = F, align_vertical = F)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+
+
+```{r tree_1}
+tree_seq <- function(fun_dat, tree_dat, trees, shrink){
+  p1 <- fun_dat %>%
+  filter(shrinkage %in% as.numeric(shrink), 
+         Set == "Test", 
+         ntrees %in% c(trees)) %>% 
+      droplevels(.) %>% 
+  ggplot(aes(x = x, y = y)) %>% 
+  + geom_point() %>% 
+  + geom_line(aes(y = prediction), colour = "#F21A00", size = 1.5) %>% 
+  + facet_grid(ntrees ~ shrinkage, labeller=label_both) %>% 
+  + theme_bw_2() %>% 
+  + labs(title = "Sum of trees")
+
+
+p2 <- tree_dat %>%
+  filter(shrinkage %in% as.numeric(shrink), 
+         Set == "Test", 
+         ntrees %in% c(trees)) %>% 
+  droplevels(.) %>% 
+  ggplot(aes(x = x, y = resid)) %>% 
+  + geom_point() %>% 
+  + geom_line(aes(y = next_tree / as.numeric(shrink_num)), colour = "#3B9AB2", size = 1.5) %>% 
+  + facet_grid(tree ~ shrinkage, labeller=label_both) %>% 
+  + theme_bw_2() %>% 
+#  + theme(aspect.ratio = 1) %>% 
+  + scale_y_continuous("Residuals") %>% 
+  + labs(title = "Next tree")
+
+p12 <- limnolrgy::gg_arrange(list(p1, p2), grid.arrange_args = c(ncol = 2), align_horizontal = TRUE, align_vertical = TRUE)
+
+return(p12)
+}
+```
+
+
+## Zero trees - (single split)
+
+```{r}
+p12 <- tree_seq(newdat4, newdat6, trees = 0, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+
+
+## 1 tree 
+
+```{r tree_2}
+p12 <- tree_seq(newdat4, newdat6, trees = 1, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 2 trees 
+
+```{r tree_3}
+p12 <- tree_seq(newdat4, newdat6, trees = 2, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 3 trees 
+
+```{r tree_4}
+p12 <- tree_seq(newdat4, newdat6, trees = 3, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 4 trees 
+
+```{r tree_5}
+p12 <- tree_seq(newdat4, newdat6, trees = 4, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 5 trees
+
+```{r tree_6}
+p12 <- tree_seq(newdat4, newdat6, trees = 5, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 6 trees
+
+```{r tree_7}
+p12 <- tree_seq(newdat4, newdat6, trees = 6, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 7 trees
+
+```{r tree_8}
+p12 <- tree_seq(newdat4, newdat6, trees = 7, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+
+
+## 0 - 3 trees 
+
+```{r trees_1_4, fig.width=5, fig.height=5.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 0:3, shrink = 1)
+grid::grid.newpage()
+grid::grid.draw(p12) 
+```
+
+## > Lots of trees
+
+```{r oob, fig.width=5}
+newdat3 %>%
+  filter(ntrees %in% c(1, 8, 64, 1000),
+         shrinkage == 1,
+         Set == "Test") %>% 
+  ggplot(aes(x = x, y = prediction)) %>% 
+  + geom_point(aes(x=x, y=y), colour = "Darkgrey") %>% 
+  + geom_line(aes(y = True), colour = "Black", size = 1.2) %>% 
+  + geom_line(colour = "#F21A00", size = 1.2) %>% 
+  + facet_wrap(~ntrees, ncol = 2, labeller=label_both) %>% 
+  + theme_bw_2()
+```
+
+# When to stop?
+
+## Use test data
+
+```{r oob_over, fig.width=7}
+newdat_all_x_sub <- newdat_all_x %>% 
+  filter(ntrees %in% c(5000),
+         shrinkage == 1,
+         x  < 0.5, x > 0.1) %>% 
+  mutate(Set = factor(Set, ordered = T, levels = c("Training", "Test")))
+
+
+newdat3 %>%
+  filter(ntrees %in% c(5000),
+         shrinkage == 1,
+         x  < 0.5, x > 0.1) %>% 
+  ggplot(aes(x = x, y = prediction)) %>% 
+  + geom_point(aes(x=x, y=y), colour = "Black") %>% 
+  + geom_line(data = newdat_all_x_sub, aes(y = True), colour = "Black") %>% 
+  + geom_line(data = newdat_all_x_sub, colour = "#F21A00") %>% 
+  + facet_grid(ntrees~Set, labeller=label_both) %>% 
+  + theme_bw_2()
+```
+
+
+
+```{r}
+get_error <- function(mod) {dat <- with(mod, data.frame(n_trees = 1:n.trees, train_error = train.error, test_error = valid.error)) %>%
+  gather(error_type, error, -n_trees)
+return(dat)
+}
+
+error_df <- plyr::ldply(mods, get_error) %>% 
+  tbl_df()
+```
+
+## Test vs. training error
+
+```{r error_shrink_1}
+error_df %>% 
+  filter(n_trees <= 500,
+         shrinkage == 1) %>% 
+  ggplot(aes(x = n_trees, y = error, colour = error_type)) %>% 
+  + geom_line() %>% 
+  + theme_bw_2()
+```
+
+## Optimum no. trees
+
+Still wiggly
+
+```{r opt_shrink_1}
+newdat3 %>%
+  filter(tree_grp == "best",
+         shrinkage == 1,
+         Set == "Test") %>% 
+  ggplot(aes(x = x, y = prediction)) %>% 
+  + geom_point(aes(x=x, y=y)) %>% 
+  + geom_line(colour = "#F21A00", size = 1.5) %>% 
+  + facet_wrap(~ shrinkage + ntrees, labeller=label_both) %>% 
+  + theme_bw_2()
+```
+
+
+# Lower the learning rate (shrinkage)
+
+## Zero trees, LR = 0.1
+
+```{r tree_0_0.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 0, shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 1 tree, LR = 0.1
+
+```{r tree_2_0.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 1, shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 2 trees, LR = 0.1
+
+```{r tree_3_0.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 2, shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 3 trees, LR = 0.1
+
+```{r tree_4_0.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 3, shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 4 trees, LR = 0.1
+
+```{r tree_5_0.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 4, shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 5 trees, LR = 0.1
+
+```{r tree_6_0.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 5, shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 6 trees, LR = 0.1
+
+```{r tree_7_0.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 6, shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+## 7 trees, LR = 0.1
+
+```{r tree_8_0.5}
+p12 <- tree_seq(newdat4, newdat6, trees = 7, shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12)
+```
+
+
+## 0 - 3 trees 
+
+```{r trees_1_4_0.1, fig.width=5, fig.height=5.5}
+p12 <- tree_seq(newdat4, newdat6, trees = c(0, 1, 2), shrink = 0.1)
+grid::grid.newpage()
+grid::grid.draw(p12) 
+```
+
+
+## Test error
+
+```{r error_shrink_2}
+error_df %>%
+  mutate(shrinkage = factor(shrinkage, ordered = T, levels = (unique(shrinkage)))) %>% 
+  filter(n_trees <= 1000,
+         shrinkage %in% c(0.1, 1)) %>% 
+  ggplot(aes(x = n_trees, y = error, colour = error_type)) %>% 
+  + geom_line() %>% 
+  + facet_wrap(~shrinkage, as.table = TRUE, labeller=label_both) %>% 
+  + theme_bw_2() %>% 
+  + geom_hline(yintercept = filter(error_df, shrinkage=="0.1"
+                                   , n_trees == best_iter[best_iter$shrinkage=="0.1", "V1"]
+                                   , error_type == "test_error")$error) %>% 
+  + scale_y_continuous("Test error")
+```
+
+
+## Optimum trees; LR = 1 vs. 0.1 
+```{r opt_shrink_0.1}
+newdat3 %>%
+  filter(tree_grp == "best",
+         shrinkage %in% c(0.1, 1),
+         Set == "Test") %>% 
+  ggplot(aes(x = x, y = prediction)) %>% 
+  + geom_point(aes(x=x, y=y), colour = "Darkgrey") %>% 
+  + geom_line(aes(y = True), colour = "Black", size = 1.5) %>%
+  + geom_line(colour = "#F21A00", size = 1.5) %>%
+  + facet_wrap(~ shrinkage + ntrees, labeller=label_both) %>% 
+  + theme_bw_2()
+```
+
+
+# Interaction depth
+
+```{r make_grp_data}
+tmp <- make_data(n = 1000, Grp = "B", b0 = 4, b1 = 0.025) %>% 
+  tbl_df()
+
+dat2 <- bind_rows(dat, tmp) %>% 
+  mutate(Grp = factor(Grp))
+```
+
+##
+
+```{r}
+p <- dat2 %>%
+  ggplot(aes(x = x, y = y, colour = Grp)) %>% 
+  + geom_line(aes(y = True), size = 1.5) %>% 
+  + geom_point(alpha = 0.5) %>% 
+  + theme_bw_2_asp1()
+p
+```
+
+# Fitting a BRT with gbm()
+
+## Data
+
+```{r look_at_data}
+dat2 %>% 
+  select(-Set, -True) %>% 
+  arrange(x, Grp)
+```
+
+
+## Two groups (interaction.depth = 1)
+
+interaction.depth = 1 means ***no interaction!***
+
+```{r brt_id_1, echo = TRUE}
+brt_id_1 <- gbm (y ~ x + Grp, data = dat2
+            , n.trees = 1000
+            , shrinkage = 0.1
+            , interaction.depth = 1
+            , cv.folds = 5)
+```
+
+## Model diagnostics
+```{r, echo=T, tidy=TRUE, tidy.opts=list(blank=TRUE, width.cutoff=40)}
+brt_id_1
+```
+
+## 
+```{r, echo=T, fig.show='hold', fig.height=3.5, fig.width=4.5}
+best_iter <- gbm.perf(brt_id_1)
+print(best_iter)
+```
+
+##
+```{r, echo=T, fig.width=3, fig.show='hold', fig.height=3}
+summary(brt_id_1, n.trees = best_iter)
+```
+
+##
+```{r, echo=T}
+plot(brt_id_1
+     , n.trees = best_iter
+     , i.var = 1:2, layout = c(2, 1))
+```
+
+
+
+## , interaction.depth = 1
+```{r, echo = TRUE}
+dat2$y_hat_id_1 <- predict(brt_id_1, n.trees = best_iter)
+```
+
+```{r}
+p <- dat2 %>%
+  ggplot(aes(x = x, y = y, colour = Grp)) %>% 
+  + geom_point(alpha = 0.25) %>% 
+  + theme_bw_2_asp1() %>% 
+  + theme(legend.position = "none")
+
+p1 <- p + 
+    geom_line(aes(y = True, colour = Grp), size = 1.5) +
+    ggtitle("True function")
+
+p2 <- p +
+    geom_line(aes(x = x, y = y_hat_id_1, colour = Grp), size = 1.5) +
+    ggtitle("BRT estimate")
+
+p12 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+
+## Two groups (interaction.depth = 2)
+
+
+```{r brt_id_2, echo = TRUE}
+brt_id_2 <- gbm(y ~ x + Grp, data = dat2
+            , n.trees = 1000
+            , shrinkage = 0.1
+            , interaction.depth = 2
+            , cv.folds = 5)
+
+best_iter2 <- gbm.perf(brt_id_2, plot.it = F)
+```
+
+
+## , interaction.depth = 2
+```{r, echo = TRUE}
+dat2$y_hat_id_2 <- predict(brt_id_2, n.trees = best_iter2)
+```
+
+```{r}
+p <- dat2 %>%
+  ggplot(aes(x = x, y = y, colour = Grp)) %>% 
+  + geom_point(alpha = 0.25) %>% 
+  + theme_bw_2_asp1() %>% 
+  + theme(legend.position = "none")
+
+p1 <- p + 
+    geom_line(aes(y = True, colour = Grp), size = 1.5) +
+    ggtitle("True function")
+
+p2 <- p +
+    geom_line(aes(x = x, y = y_hat_id_2, colour = Grp), size = 1.5) +
+    ggtitle("BRT estimate")
+
+p12 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+## Summary boosted trees
+
+* Sum of long chain of simple trees iteratively fit to residuals
+    * n.trees = how many trees to fit
+    * shrinkage = learning rate ≊ regularization
+    * interaction.depth ≊ tree depth ≊ base learner complexity
+* Optimal size and complexity from test error (out of bag, OOB)
+    * true test set or cross-validation
+* R package *gbm* shown here - others available
+
+## Resources
+
+Free pdf versions of these great text books are available from the authors.  
+
+*  "The Elements of Statistical Learning: Data Mining, Inference, and Prediction" Hastie, T., Tibshirani, R., & Friedman, J. 
+    * http://statweb.stanford.edu/~tibs/ElemStatLearn/
+
+
+*  "An Introduction to Statistical Learning with Applications in R" Gareth James, Daniela Witten, Trevor Hastie, Robert Tibshirani 
+    * http://www-bcf.usc.edu/~gareth/ISL/
+
+
