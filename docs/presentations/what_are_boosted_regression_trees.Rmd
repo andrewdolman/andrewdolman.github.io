@@ -17,11 +17,82 @@ library(gbm)
 library(ggplot2)
 library(dplyr)
 library(tidyr)
-library(limnolrgy)
 library(gridExtra)
 library(tree)
 library(ggdendro)
 ```
+
+```{r functions}
+gg_arrange <-
+  function(lst, grid.arrange_args = NULL, labels = NULL, align_horizontal = TRUE, align_vertical = TRUE, single_y_axis = FALSE) {
+    # Add labels
+    if (is.null(labels) == FALSE) {
+      fun <- function(lst, labels) {
+        lst <-
+          lst + labs(title = labels) +  theme(plot.title = element_text(hjust = 0, vjust = 1))
+        return(lst)
+      }
+      
+      lst <- mapply(fun, labels = labels, lst = lst, SIMPLIFY = FALSE)
+    }
+    
+    # Convert to gtables
+    tables <- lapply(lst, function(x)
+      ggplot2::ggplot_gtable(ggplot2::ggplot_build(x)))
+    
+    if (align_horizontal == TRUE) {
+      # Get max width and set widths of all plots to this
+      widths <- lapply(tables, function(x)
+        x$widths)
+      maxWidth <- do.call(grid::unit.pmax, widths)
+      tables <- lapply(tables, function(x) {
+        x$widths <- maxWidth
+        x
+      })
+    }
+    
+    if(single_y_axis == TRUE){
+      if(length(lst) != 2) stop("binding with single y axis only supported for 2 column figure at present")
+      
+      # get width of first 2 cols
+      sum_lft <- sum(grid::convertWidth(tables[[2]]$widths[1:2], "cm", valueOnly = T))
+      
+      # create new out boundary
+      tables[[2]]$widths[7] <- tables[[2]]$widths[6]
+      
+      # replace previous boundary with width of 1:2
+      tables[[1]]$widths[6] <- grid::unit(sum_lft, "cm")
+      
+      grid::convertWidth(tables[[2]]$widths[6], "cm")
+      # set first 2 column to 0 width (axis label and numbers)
+      tables[[2]]$widths[1:2] <- 0  
+      }
+    
+    if (align_vertical == TRUE) {
+      # Do the same for heights
+      heights <- lapply(tables, function(x)
+        x$heights)
+      maxHeight <- do.call(grid::unit.pmax, heights)
+      tables <- lapply(tables, function(x) {
+        x$heights <- maxHeight
+        x
+      })
+    }
+    
+    # Build the final plot
+    args_list <- c(tables, grid.arrange_args)
+    g <- do.call(gridExtra::arrangeGrob, args_list)
+    return(g)
+  }
+
+theme_bw_2 <- function() {ggplot2::theme_bw() +
+    ggplot2::theme(panel.grid.minor = ggplot2::element_blank())}
+
+theme_bw_2_asp1 <- function() {ggplot2::theme_bw() +
+    ggplot2::theme(panel.grid.minor = ggplot2::element_blank(), aspect.ratio = 1)}
+
+```
+
 
 ```{r make_data}
 make_data <- function(n, Grp = "A", b0 = 5, b1 = -0.1){
@@ -182,11 +253,12 @@ p <- newdat %>%
   + geom_line(aes(y = y_hat_tr1, colour = "Tree estimate"), size = 1.5) %>% 
   + scale_colour_manual("", values = c("Red", "Black")) %>% 
   + scale_x_continuous(limits = c(0, 10)) %>% 
-  + theme_bw_2_asp1() %>% 
+  + theme_bw() %>% 
+  + theme(aspect.ratio = 1) %>% 
   + theme(legend.position = "top")
 #p
 
-p12 <- limnolrgy::gg_arrange(list(p_tree, p), grid.arrange_args = list(ncol = 2), align_horizontal = F, align_vertical = F)
+p12 <- arrangeGrob(p_tree, p, ncol = 2)
 grid::grid.newpage()
 grid::grid.draw(p12)
 ```
@@ -204,7 +276,9 @@ tree_seq <- function(fun_dat, tree_dat, trees, shrink){
   + geom_point() %>% 
   + geom_line(aes(y = prediction), colour = "#F21A00", size = 1.5) %>% 
   + facet_grid(ntrees ~ shrinkage, labeller=label_both) %>% 
-  + theme_bw_2() %>% 
+  + theme_bw() %>%  
+  + theme(aspect.ratio = 1) %>% 
+  + theme(aspect.ratio = 1) %>% 
   + labs(title = "Sum of trees")
 
 
@@ -217,8 +291,8 @@ p2 <- tree_dat %>%
   + geom_point() %>% 
   + geom_line(aes(y = next_tree / as.numeric(shrink_num)), colour = "#3B9AB2", size = 1.5) %>% 
   + facet_grid(tree ~ shrinkage, labeller=label_both) %>% 
-  + theme_bw_2() %>% 
-#  + theme(aspect.ratio = 1) %>% 
+  + theme_bw() %>% 
+  + theme(aspect.ratio = 1) %>% 
   + scale_y_continuous("Residuals") %>% 
   + labs(title = "Next tree")
 
