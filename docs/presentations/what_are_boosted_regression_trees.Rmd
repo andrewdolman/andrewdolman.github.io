@@ -141,7 +141,7 @@ par(mfrow = c(1, 1))
 newdat <- dat %>% 
   arrange(x)
 
-preds <- plyr::ldply(mods, function(x) predict(x, newdata = newdat, n.trees = c(1:8, 16, 32, 64, 128, 1000, 5000)))
+preds <- plyr::ldply(mods, function(x) predict(x, new_data = newdat, num_trees = c(1:8, 16, 32, 64, 128, 1000, 5000)))
 
 newdat2 <- cbind(newdat, preds) %>% 
   gather(ntrees, prediction, -x, -Grp, -y, -Set, -True, -shrinkage) %>%
@@ -152,7 +152,7 @@ newdat2 <- cbind(newdat, preds) %>%
 
 
 best_preds <- plyr::ldply(mods, function(x)
-  data.frame(prediction = predict(x, newdata = newdat, n.trees = gbm.perf(x, method = "test", plot.it = FALSE)),
+  data.frame(prediction = predict(x, new_data = newdat, num_trees = gbm.perf(x, method = "test", plot.it = FALSE)),
              ntrees = (gbm.perf(x, method = "test", plot.it = FALSE)),
              tree_grp = "best")) %>% 
   cbind(newdat) %>% 
@@ -421,7 +421,7 @@ newdat3 %>%
 
 
 ```{r}
-get_error <- function(mod) {dat <- with(mod, data.frame(n_trees = 1:n.trees, train_error = train.error, test_error = valid.error)) %>%
+get_error <- function(mod) {dat <- with(mod, data.frame(n_trees = 1:5000, train_error = train.error, test_error = valid.error)) %>%
   gather(error_type, error, -n_trees)
 return(dat)
 }
@@ -638,7 +638,7 @@ plot(brt_id_1
 
 ## , interaction.depth = 1
 ```{r, echo = TRUE}
-dat2$y_hat_id_1 <- predict(brt_id_1, n.trees = best_iter)
+dat2$y_hat_id_1 <- predict(brt_id_1, num_trees = best_iter, new_data = dat2)
 ```
 
 ```{r}
@@ -676,7 +676,7 @@ best_iter2 <- gbm.perf(brt_id_2, plot.it = F)
 
 ## , interaction.depth = 2
 ```{r, echo = TRUE}
-dat2$y_hat_id_2 <- predict(brt_id_2, n.trees = best_iter2)
+dat2$y_hat_id_2 <- predict(brt_id_2, num_trees = best_iter2, new_data = dat2)
 ```
 
 ```{r}
